@@ -5,6 +5,9 @@ import math
 import glob
 import pandas as pd
 import pymupdf as fitz
+import pytesseract
+from pdf2image import convert_from_path
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 OUTPUT_FILE = "digi_score_output.xlsx"
 KEYWORD_GROUPS = {
     "Cong_nghe_nen_tang": [
@@ -27,12 +30,20 @@ KEYWORD_GROUPS = {
 # Gộp tất cả từ khóa thành 1 danh sách phẳng để đếm
 ALL_KEYWORDS = [kw for group in KEYWORD_GROUPS.values() for kw in group]
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Trích xuất toàn bộ text từ 1 file PDF (dạng text, không phải scan ảnh)."""
+    """Trích xuất toàn bộ text từ 1 file PDF. Trang nào text quá ít (nghi scan) sẽ tự động OCR."""
     text = ""
     try:
         doc = fitz.open(pdf_path)
-        for page in doc:
-            text += page.get_text()
+        for i, page in enumerate(doc):
+            page_text = page.get_text()
+            if len(page_text.strip()) < 50:
+                try:
+                    images = convert_from_path(pdf_path, dpi=300, first_page=i + 1, last_page=i + 1)
+                    page_text = pytesseract.image_to_string(images[0], lang='vie')
+                    print(f"   [OCR] Đã chạy OCR cho trang {i+1}")
+                except Exception as ocr_err:
+                    print(f"   [OCR LỖI] Trang {i+1}: {ocr_err}")
+            text += page_text
         doc.close()
     except Exception as e:
         print(f"  [LỖI] Không đọc được {pdf_path}: {e}")
