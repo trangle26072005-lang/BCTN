@@ -29,25 +29,42 @@ KEYWORD_GROUPS = {
  
 # Gộp tất cả từ khóa thành 1 danh sách phẳng để đếm
 ALL_KEYWORDS = [kw for group in KEYWORD_GROUPS.values() for kw in group]
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Trích xuất toàn bộ text từ 1 file PDF. Trang nào text quá ít (nghi scan) sẽ tự động OCR."""
-    text = ""
+def extract_text_from_pdf(pdf_path: str) -> dict:
+    """Trích xuất text từ PDF. Trang nào ít text (nghi scan) sẽ chạy OCR."""
+    result = {"text": "", "status": "Success", "message": "",
+              "page_count": 0, "native_chars": 0, "ocr_pages": [], "ocr_failed_pages": []}
     try:
         doc = fitz.open(pdf_path)
+        result["page_count"] = doc.page_count
+        full_text = ""
+
         for i, page in enumerate(doc):
             page_text = page.get_text()
+            result["native_chars"] += len(page_text)
+
             if len(page_text.strip()) < 50:
                 try:
-                    images = convert_from_path(pdf_path, dpi=300, first_page=i + 1, last_page=i + 1)
-                    page_text = pytesseract.image_to_string(images[0], lang='vie')
-                    print(f"   [OCR] Đã chạy OCR cho trang {i+1}")
+                    images = convert_from_path(
+                        pdf_path, dpi=300,
+                        first_page=i + 1, last_page=i + 1,
+                        poppler_path=r"C:\Users\Lenovo\Desktop\KLTN\poppler-26.02.0\Library\bin"
+                    )
+                    page_text = pytesseract.image_to_string(images[0], lang="vie")
+                    result["ocr_pages"].append(i + 1)
                 except Exception as ocr_err:
-                    print(f"   [OCR LỖI] Trang {i+1}: {ocr_err}")
-            text += page_text
+                    result["ocr_failed_pages"].append(i + 1)
+                    print(f"   [OCR LỖI] Trang {i + 1}: {ocr_err}")
+
+            full_text += page_text + "\n"
+
         doc.close()
+        result["text"] = full_text
     except Exception as e:
+        result["status"] = "Failed"
+        result["message"] = str(e)
         print(f"  [LỖI] Không đọc được {pdf_path}: {e}")
-    return text
+
+    return result
  
  
 def normalize_text(text: str) -> str:
@@ -109,7 +126,8 @@ def main():
         ma_ck, nam = parse_filename(filename)
         print(f"-> Đang xử lý: {filename}  (Mã CK: {ma_ck}, Năm: {nam})")
  
-        raw_text = extract_text_from_pdf(pdf_path)
+        extraction = extract_text_from_pdf(pdf_path)
+        raw_text = extraction["text"]
  
         if is_pdf_likely_scanned(raw_text):
             print(f"   [CẢNH BÁO] File có vẻ là bản scan ảnh, text trích ra rất ít.")
