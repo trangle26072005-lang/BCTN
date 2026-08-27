@@ -1,4 +1,4 @@
-INPUT_FOLDER = r"C:\Users\Lenovo\Desktop\KLTN\DATA\DATA TỔNG HỢP\BCTN SAMPLE TEST CODE"
+INPUT_FOLDER = r"C:\Users\Lenovo\Desktop\KLTN\DATA\DATA TỔNG HỢP\BCTN"
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 import unicodedata
@@ -94,8 +94,6 @@ def extract_text_from_pdf(pdf_path: str, dpi: int = 300, max_workers: int = 4) -
         print(f"  [LỖI] Không đọc được {pdf_path}: {e}")
 
     return {"text": "".join(parts)}
- 
- 
 def normalize_text(text: str) -> str:
     """Chuẩn hóa văn bản: lowercase, gộp khoảng trắng thừa."""
     text = text.lower()
@@ -108,7 +106,6 @@ def normalize_text_for_keywords(text: str) -> str:
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"\s+", " ", text)
     return text
- 
 def count_keywords(text: str, keyword_terms: dict) -> dict:
     """
     Đếm số lần xuất hiện của từng từ khóa (kể cả alias) trong văn bản.
@@ -128,8 +125,6 @@ def count_keywords(text: str, keyword_terms: dict) -> dict:
                 matched_spans.add(m.span())
         counts[keyword] = len(matched_spans)
     return counts
- 
- 
 def count_total_words(text: str) -> int:
     """Đếm tổng số từ trong văn bản (ước lượng, tách theo khoảng trắng)."""
     return len(text.split())
@@ -182,11 +177,10 @@ def main():
  
         norm_text = normalize_text(raw_text)
         total_words = count_total_words(norm_text)
-
         kw_text = normalize_text_for_keywords(raw_text)      # <-- text riêng cho đếm từ khóa, không lowercase
         kw_counts = count_keywords(kw_text, KEYWORD_TERMS)    # <-- dùng KEYWORD_TERMS (có alias) thay ALL_KEYWORDS
         total_kw_count = sum(kw_counts.values())
- 
+         
         # Ghi chi tiết từng từ khóa
         for group_name, kws in KEYWORD_GROUPS.items():
             for kw in kws:
@@ -198,12 +192,12 @@ def main():
                     "Tu_khoa": kw,
                     "So_lan_xuat_hien": kw_counts[kw],
                 })
- 
+         
         # Tính biến DIGI theo các cách phổ biến trong nghiên cứu
         digi_ln = math.log(total_kw_count + 1)  # ln(tổng tần suất + 1)
         digi_ratio = (total_kw_count / total_words) if total_words > 0 else 0
         digi_binary = 1 if total_kw_count > 0 else 0
- 
+         
         summary_rows.append({
             "Ma_CK": ma_ck,
             "Nam": nam,
@@ -214,23 +208,23 @@ def main():
             "DIGI_ty_le(%)": round(digi_ratio * 100, 4),
             "DIGI_nhi_phan": digi_binary,
         })
- 
+         
         print(f"   Tổng từ khóa tìm thấy: {total_kw_count} | Tổng số từ: {total_words} "
-              f"| DIGI_ln = {round(digi_ln, 4)}\n")
- 
+                f"| DIGI_ln = {round(digi_ln, 4)}\n")
+         
     # Xuất ra Excel
     df_detail = pd.DataFrame(detail_rows)
     df_summary = pd.DataFrame(summary_rows)
- 
+         
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df_summary.to_excel(writer, sheet_name="Tong_hop", index=False)
         df_detail.to_excel(writer, sheet_name="Chi_tiet", index=False)
- 
+         
     print(f"\n✅ HOÀN TẤT! Kết quả đã lưu tại: {OUTPUT_FILE}")
     print(f"   - Sheet 'Tong_hop': dùng để đưa vào Stata/R/Python chạy hồi quy")
     print(f"   - Sheet 'Chi_tiet': dùng để kiểm tra lại từng từ khóa nếu cần")
- 
- 
+         
+         
 if __name__ == "__main__":
     main()
 print("Đường dẫn đang kiểm tra:", INPUT_FOLDER)
