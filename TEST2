@@ -1,0 +1,266 @@
+INPUT_FOLDER = r"C:\Users\Lenovo\Desktop\KLTN\DATA\DATA TỔNG HỢP\BCTN SAMPLE TEST CODE"
+import os
+import re
+import math
+import glob
+import pandas as pd
+import pymupdf as fitz
+import pytesseract
+import sys
+import time
+import unicodedata
+import openpyxl
+from pdf2image import convert_from_path
+
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+OUTPUT_FILE = "digi_score_output.xlsx"
+
+KEYWORD_DICT_FILE = r"C:\Users\Lenovo\Desktop\KLTN\DATA\DATA TỔNG HỢP\keyword_dictionary.xlsx"
+SHORT_TERM_MAX_LEN = 5  # từ/cụm <= độ dài này -> so khớp giữ nguyên hoa/thường (AI, 5G, IoT, CNTT...)
+
+
+def load_keyword_dictionary(path: str, sheet_name: str = "Keywords_Used"):
+    """
+    Đọc keyword_dictionary.xlsx, trả về:
+      - groups: {dimension: [keyword, ...]}          -> dùng cho detail_rows như code cũ
+      - terms_map: {keyword: [(term, case_sensitive), ...]}  -> keyword chính + alias, để đếm
+    """
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb[sheet_name]
+    header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col = {name: i for i, name in enumerate(header)}
+
+    groups, terms_map = {}, {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or row[col["Keyword ID"]] is None:
+            continue
+        keyword = unicodedata.normalize("NFC", str(row[col["Keyword"]]).strip())
+        dimension = row[col["Keyword Dimension"]]
+        aliases_raw = row[col["Aliases"]]
+        aliases = (
+            [unicodedata.normalize("NFC", a.strip()) for a in aliases_raw.split(";") if a.strip()]
+            if aliases_raw else []
+        )
+
+        groups.setdefault(dimension, []).append(keyword)
+        all_terms = [keyword] + aliases
+        terms_map[keyword] = [(t, len(t) <= SHORT_TERM_MAX_LEN) for t in all_terms]
+
+    return groups, terms_map
+
+
+
+# Gộp tất cả từ khóa thành 1 danh sách phẳng để đếm
+KEYWORD_GROUPS, KEYWORD_TERMS = load_keyword_dictionary(KEYWORD_DICT_FILE)
+ALL_KEYWORDS = [kw for group in KEYWORD_GROUPS.values() for kw in group]
+def extract_text_from_pdf(pdf_path: str, dpi: int = 300, max_workers: int = 4) -> dict:
+    """Trích xuất toàn bộ text từ 1 file PDF. Trang nào text quá ít (nghi scan) sẽ tự động OCR (song song)."""
+    parts = []
+    try:
+        doc = fitz.open(pdf_path)
+        zoom = dpi / 72
+        matrix = fitz.Matrix(zoom, zoom)
+        n_pages = len(doc)
+        results = [""] * n_pages
+        ocr_jobs = []
+
+        for i, page in enumerate(doc):
+            page_text = page.get_text()
+            if len(page_text.strip()) < 50:
+                pix = page.get_pixmap(matrix=matrix)
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                ocr_jobs.append((i, img))
+            else:
+                results[i] = page_text
+
+        doc.close()
+
+        def run_ocr(job):
+            i, img = job
+            try:
+                text = pytesseract.image_to_string(img, lang="vie", config="--oem 3 --psm 6")
+                return i, text
+            except Exception as ocr_err:
+                print(f"\n   [OCR LỖI] Trang {i + 1}: {ocr_err}")
+                return i, ""
+
+        if ocr_jobs:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for i, text in executor.map(run_ocr, ocr_jobs):
+                    results[i] = text
+
+        parts = results
+
+    except Exception as e:
+        print(f"\n  [LỖI] Không đọc được {pdf_path}: {e}")
+
+    return {"text": "".join(parts)}
+ 
+ 
+def normalize_text(text: str) -> str:
+    """Chuẩn hóa văn bản: lowercase, gộp khoảng trắng thừa."""
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+ 
+ 
+def count_keywords(text: str, keywords: list) -> dict:
+    """Đếm số lần xuất hiện của từng từ khóa trong văn bản (đếm chồng lấp cho phép)."""
+    text_lower = text.lower()
+    counts = {}
+    for kw in keywords:
+        pattern = r'\b' + re.escape(kw.lower()) + r'\b'
+        counts[kw] = len(re.findall(pattern, text_lower))
+    return counts
+ 
+ 
+def count_total_words(text: str) -> int:
+    """Đếm tổng số từ trong văn bản (ước lượng, tách theo khoảng trắng)."""
+    return len(text.split())
+ 
+ 
+def parse_filename(filename: str):
+    """
+    Tách Mã CK và Năm từ tên file, giả định định dạng: MACK_NAM.pdf
+    VD: FPT_2020.pdf -> ("FPT", 2020)
+    Nếu tên file không đúng định dạng, trả về (tên file, None) và bạn
+    cần bổ sung thủ công trong file Excel kết quả.
+    """
+    base = os.path.splitext(os.path.basename(filename))[0]
+    match = re.match(r"([A-Za-z0-9]+)[_\-](\d{4})", base)
+    if match:
+        return match.group(1).upper(), int(match.group(2))
+    return base, None
+ 
+
+_progress_initialized = False
+_start_time = None
+
+def show_overall_progress(current: int, total: int, current_filename: str = "", status: str = ""):
+    global _progress_initialized, _start_time
+
+    if _start_time is None:
+        _start_time = time.time()
+
+    elapsed = time.time() - _start_time
+    percent = (current / total) * 100 if total > 0 else 100
+    bar_len = 30
+    filled = int(bar_len * current / total) if total > 0 else bar_len
+    bar = "▰" * filled + "▱" * (bar_len - filled)
+
+    # Tính ETA dựa trên tốc độ trung bình/file đã xử lý xong
+    if current > 0:
+        avg_time_per_file = elapsed / current
+        remaining = avg_time_per_file * (total - current)
+    else:
+        remaining = 0
+
+    def fmt_time(seconds: float) -> str:
+        seconds = int(seconds)
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}h{m:02d}p{s:02d}s"
+        return f"{m}p{s:02d}s"
+
+    line1 = (f"[{bar}] {percent:5.1f}% ({current}/{total} file) "
+              f"| Đã chạy: {fmt_time(elapsed)} | Còn lại: ~{fmt_time(remaining)}")
+    line2 = f"   -> {status}: {current_filename}"
+
+    if _progress_initialized:
+        sys.stdout.write("\x1b[2A")
+    _progress_initialized = True
+
+    sys.stdout.write("\x1b[2K" + line1 + "\n")
+    sys.stdout.write("\x1b[2K" + line2 + "\n")
+    sys.stdout.flush()
+
+def main():
+    global _progress_initialized, _start_time
+    _progress_initialized = False
+    _start_time = None  # reset lại mỗi lần chạy main()
+
+    if not os.path.isdir(INPUT_FOLDER):
+        print(f"[LỖI] Không tìm thấy thư mục '{INPUT_FOLDER}'.")
+        return
+
+    pdf_files = glob.glob(os.path.join(INPUT_FOLDER, "*.pdf"))
+    if not pdf_files:
+        print(f"[LỖI] Không có file .pdf nào trong thư mục '{INPUT_FOLDER}'.")
+        return
+
+    total_files = len(pdf_files)
+    print(f"Tìm thấy {total_files} file PDF. Bắt đầu xử lý...\n")
+
+    detail_rows = []
+    summary_rows = []
+
+    for idx, pdf_path in enumerate(sorted(pdf_files), 1):
+        filename = os.path.basename(pdf_path)
+        ma_ck, nam = parse_filename(filename)
+
+        show_overall_progress(idx - 1, total_files, filename, status="Đang xử lý")
+
+        extraction = extract_text_from_pdf(pdf_path)
+        raw_text = extraction["text"]
+
+        norm_text = normalize_text(raw_text)
+        total_words = count_total_words(norm_text)
+        kw_counts = count_keywords(norm_text, ALL_KEYWORDS)
+        total_kw_count = sum(kw_counts.values())
+
+        for group_name, kws in KEYWORD_GROUPS.items():
+            for kw in kws:
+                detail_rows.append({
+                    "Ma_CK": ma_ck, "Nam": nam, "File": filename,
+                    "Nhom_tu_khoa": group_name, "Tu_khoa": kw,
+                    "So_lan_xuat_hien": kw_counts[kw],
+                })
+
+        digi_ln = math.log(total_kw_count + 1)
+        digi_ratio = (total_kw_count / total_words) if total_words > 0 else 0
+        digi_binary = 1 if total_kw_count > 0 else 0
+
+        summary_rows.append({
+            "Ma_CK": ma_ck, "Nam": nam, "File": filename,
+            "Tong_so_tu_trong_BCTN": total_words,
+            "Tong_tan_suat_tu_khoa": total_kw_count,
+            "DIGI_ln": round(digi_ln, 4),
+            "DIGI_ty_le(%)": round(digi_ratio * 100, 4),
+            "DIGI_nhi_phan": digi_binary,
+        })
+
+        show_overall_progress(idx, total_files, filename, status="Đã xong")
+
+    
+    total_elapsed = time.time() - _start_time
+    print(f"\nTổng thời gian xử lý: {total_elapsed/60:.1f} phút\n")
+    avg_per_file = total_elapsed / total_files if total_files > 0 else 0
+    def fmt_time(seconds: float) -> str:
+        seconds = int(seconds)
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h} giờ {m:02d} phút {s:02d} giây"
+        return f"{m} phút {s:02d} giây"
+    
+
+    df_detail = pd.DataFrame(detail_rows)
+    df_summary = pd.DataFrame(summary_rows)
+
+    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+        df_summary.to_excel(writer, sheet_name="Tong_hop", index=False)
+        df_detail.to_excel(writer, sheet_name="Chi_tiet", index=False)
+
+    print(f"✅ HOÀN TẤT! Kết quả đã lưu tại: {OUTPUT_FILE}")
+    print(f"   - Sheet 'Tong_hop': dùng để đưa vào Stata/R/Python chạy hồi quy")
+    print(f"   - Sheet 'Chi_tiet': dùng để kiểm tra lại từng từ khóa nếu cần")
+    print(f"⏱  Tổng thời gian chạy: {fmt_time(total_elapsed)}  ({total_files} file, "
+          f"trung bình {avg_per_file:.1f}s/file)")
+ 
+if __name__ == "__main__":
+    main()

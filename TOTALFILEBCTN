@@ -1,0 +1,44 @@
+import os
+from openpyxl import Workbook
+FOLDER_PATH = r"C:\Users\Lenovo\Desktop\KLTN\DATA\DATA TỔNG HỢP\BCTN"
+OUTPUT_FILE = "danh_sach_pdf.xlsx"
+def quet_pdf(folder_path):
+    """Quét toàn bộ file .pdf trong folder_path (kể cả thư mục con)."""
+    danh_sach = []
+    for root, _, files in os.walk(folder_path):
+        for f in files:
+            if f.lower().endswith(".pdf"):
+                full_path = os.path.join(root, f)
+                danh_sach.append((f, full_path))
+    return danh_sach
+ 
+ 
+def xuat_excel(danh_sach, output_file):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Danh sach PDF"
+ 
+    # Tiêu đề cột
+    ws.append(["STT", "Tên file", "Đường dẫn đầy đủ"])
+ 
+    # Ghi dữ liệu
+    for idx, (ten_file, duong_dan) in enumerate(danh_sach, start=1):
+        ws.append([idx, ten_file, duong_dan])
+ 
+    # Chỉnh độ rộng cột cho dễ nhìn
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 45
+    ws.column_dimensions["C"].width = 90
+ 
+    wb.save(output_file)
+ 
+ 
+if __name__ == "__main__":
+    if not os.path.isdir(FOLDER_PATH):
+        print(f"⚠️  Không tìm thấy thư mục: {FOLDER_PATH}")
+        print("Hãy sửa biến FOLDER_PATH trong script cho đúng đường dẫn của bạn.")
+    else:
+        danh_sach = quet_pdf(FOLDER_PATH)
+        xuat_excel(danh_sach, OUTPUT_FILE)
+        print(f"✅ Đã quét được {len(danh_sach)} file PDF.")
+        print(f"✅ Đã lưu danh sách vào: {OUTPUT_FILE}")
